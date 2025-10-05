@@ -1,0 +1,12 @@
+services:
+  seo_audit.audit_service:
+    class: Drupal\seo_audit\Service\AuditService
+    arguments:
+      [
+        "@entity_type.manager",
+        "@module_handler",
+        "@logger.factory",
+        "@http_client",
+        "@database",
+        "@request_stack",
+      ]

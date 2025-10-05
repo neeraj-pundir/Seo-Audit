@@ -4,3 +4,69 @@
  * @file
  * Install, update and uninstall functions for the Seo Audit module.
  */
+
+/**
+ * Implements hook_schema().
+ */
+function seo_audit_schema() {
+  $schema['seo_audit_report'] = [
+    'description' => 'Stores seo audit results for nodes.',
+    'fields' => [
+      'nid' => [
+        'type' => 'int',
+        'not null' => TRUE,
+        'unsigned' => TRUE,
+      ],
+      'issues' => [
+        'type' => 'text',
+        'size' => 'big',
+        'not null' => FALSE,
+      ],
+      'score' => [
+        'type' => 'int',
+        'not null' => FALSE,
+        'size' => 'normal',
+      ],
+      'last_checked' => [
+        'type' => 'int',
+        'not null' => FALSE,
+        'unsigned' => TRUE,
+      ],
+    ],
+    'primary key' => ['nid'],
+  ];
+  return $schema;
+}
+
+/**
+ * Add meta_title/meta_description/edit_link columns to seo_audit_report.
+ */
+function seo_audit_update_9001() {
+  $schema = \Drupal::database()->schema();
+
+  if (!$schema->fieldExists('seo_audit_report', 'meta_title')) {
+    $schema->addField('seo_audit_report', 'meta_title', [
+      'type' => 'varchar',
+      'length' => 255,
+      'not null' => FALSE,
+      'default' => NULL,
+    ]);
+  }
+
+  if (!$schema->fieldExists('seo_audit_report', 'meta_description')) {
+    $schema->addField('seo_audit_report', 'meta_description', [
+      'type' => 'text',
+      'size' => 'big',
+      'not null' => FALSE,
+    ]);
+  }
+
+  if (!$schema->fieldExists('seo_audit_report', 'edit_link')) {
+    $schema->addField('seo_audit_report', 'edit_link', [
+      'type' => 'varchar',
+      'length' => 255,
+      'not null' => FALSE,
+      'default' => NULL,
+    ]);
+  }
+}
