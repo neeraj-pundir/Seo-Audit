@@ -2,27 +2,22 @@
 
 namespace Drupal\seo_audit\Service;
 
+use Drupal\Component\Datetime\Time;
+use Drupal\Core\Config\ConfigFactoryInterface;
 use Drupal\Core\Database\Connection;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
 use Drupal\Core\Extension\ModuleHandlerInterface;
 use Drupal\Core\Logger\LoggerChannelFactoryInterface;
-use Drupal\Core\Logger\LoggerChannelInterface;
+use Drupal\Core\Path\PathValidatorInterface;
 use Drupal\Core\Url;
 use Drupal\metatag\MetatagManagerInterface;
 use GuzzleHttp\ClientInterface;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Drupal\node\NodeInterface;
+use GuzzleHttp\Exception\RequestException;
 
 /**
  * Service to perform SEO audits on nodes.
- *
- * Responsibilities:
- *  - Read meta tags (via Metatag module when available).
- *  - Check images for missing alt attributes.
- *  - Check fields for broken links (configurable).
- *  - Persist per-node audit results into `seo_audit_report`.
- *  - Provide convenience methods: getNodesForAudit(), getOverallScore(),
- *    markDuplicateMetaInReports().
  */
 class AuditService {
 
@@ -31,119 +26,124 @@ class AuditService {
    *
    * @var \Drupal\Core\Entity\EntityTypeManagerInterface
    */
-  protected EntityTypeManagerInterface $entityTypeManager;
+  protected $entityTypeManager;
 
   /**
    * Module handler service.
    *
    * @var \Drupal\Core\Extension\ModuleHandlerInterface
    */
-  protected ModuleHandlerInterface $moduleHandler;
+  protected $moduleHandler;
 
   /**
-   * Logger channel.
+   * ConfigFactory service.
+   *
+   * @var \Drupal\Core\Config\ConfigFactoryInterface
+   */
+  protected $configFactory;
+
+  /**
+   * Logger service.
    *
    * @var \Drupal\Core\Logger\LoggerChannelInterface
    */
-  protected LoggerChannelInterface $logger;
+  protected $logger;
 
   /**
    * HTTP client for link checking.
    *
    * @var \GuzzleHttp\ClientInterface
    */
-  protected ClientInterface $httpClient;
+  protected $httpClient;
 
   /**
    * Database connection.
    *
    * @var \Drupal\Core\Database\Connection
    */
-  protected Connection $database;
+  protected $database;
 
   /**
    * Request stack for current request context.
    *
    * @var \Symfony\Component\HttpFoundation\RequestStack
    */
-  protected RequestStack $requestStack;
+  protected $requestStack;
 
   /**
-   * Metatag manager, if metatag module is enabled. Null otherwise.
+   * MetatagManager service.
    *
    * @var \Drupal\metatag\MetatagManagerInterface|null
    */
-  protected ?MetatagManagerInterface $metatagManager = NULL;
+  protected $metatagManager;
 
   /**
-   * AuditService constructor.
+   * PathValidator service.
    *
-   * @param \Drupal\Core\Entity\EntityTypeManagerInterface $entity_type_manager
-   *   The entity type manager service.
-   * @param \Drupal\Core\Extension\ModuleHandlerInterface $module_handler
-   *   The module handler service.
-   * @param \Drupal\Core\Logger\LoggerChannelFactoryInterface $logger_factory
-   *   The logger channel factory service.
-   * @param \GuzzleHttp\ClientInterface $http_client
-   *   The HTTP client service for link checking.
-   * @param \Drupal\Core\Database\Connection $database
-   *   The Database connection serivce.
-   * @param \Symfony\Component\HttpFoundation\RequestStack $request_stack
-   *   The request stack service.
+   * @var \Drupal\Core\Path\PathValidatorInterface
+   */
+  protected $pathValidator;
+
+  /**
+   * Time service.
+   *
+   * @var \Drupal\Component\Datetime\Time
+   */
+  protected $timeService;
+
+  /**
+   * Constructs a new AuditService object.
    */
   public function __construct(
     EntityTypeManagerInterface $entity_type_manager,
     ModuleHandlerInterface $module_handler,
+    ConfigFactoryInterface $config_factory,
     LoggerChannelFactoryInterface $logger_factory,
     ClientInterface $http_client,
     Connection $database,
     RequestStack $request_stack,
+    PathValidatorInterface $path_validator,
+    Time $time_service,
+    ?MetatagManagerInterface $metatag_manager = NULL,
   ) {
     $this->entityTypeManager = $entity_type_manager;
     $this->moduleHandler = $module_handler;
+    $this->configFactory = $config_factory;
     $this->logger = $logger_factory->get('seo_audit');
     $this->httpClient = $http_client;
     $this->database = $database;
     $this->requestStack = $request_stack;
-
-    // Use MetatagManager only if module is present (avoid hard dependency).
-    if ($this->moduleHandler->moduleExists('metatag')) {
-      // Use the service dynamically so container compilation doesn't fail
-      // for sites without metatag module.
-      if (\Drupal::getContainer()->has('metatag.manager')) {
-        $this->metatagManager = \Drupal::service('metatag.manager');
-      }
-    }
+    $this->pathValidator = $path_validator;
+    $this->timeService = $time_service;
+    $this->metatagManager = $metatag_manager;
   }
 
   /**
    * Return a batch of node IDs that should be audited for this run.
    *
-   * Uses configuration `seo_audit.settings.max_nodes_per_run`.
-   *
-   * @return int[]
+   * @return array
    *   Array of node IDs.
    */
   public function getNodesForAudit(): array {
-    $config = \Drupal::config('seo_audit.settings');
+    $config = $this->configFactory->get('seo_audit.settings');
     $max_nodes = (int) ($config->get('max_nodes_per_run') ?? 50);
 
     $query = $this->entityTypeManager->getStorage('node')->getQuery();
-    // Only published nodes by default; adjust as required.
-    $query->condition('status', 1);
-    $query->range(0, $max_nodes);
+    $query->condition('status', 1)
+      ->accessCheck(FALSE)
+      ->range(0, $max_nodes);
 
     return $query->execute();
   }
 
   /**
-   * Run an audit for a single node.
+   * Audit a node for SEO issues.
    *
    * @param int $nid
-   *   Node ID.
+   *   The node ID to audit.
    *
    * @return array|false
-   *   Audit details array on success, FALSE when node not found.
+   *   Audit results array or FALSE if node not found.
    */
   public function auditNode(int $nid): array|false {
     $node = $this->entityTypeManager->getStorage('node')->load($nid);
@@ -155,11 +155,9 @@ class AuditService {
     $meta_title = '';
     $meta_description = '';
 
+    // Meta tags check (unchanged)
     if ($this->metatagManager) {
-      // tagsFromEntityWithDefaults returns render array structure for tags.
       $tags = $this->metatagManager->tagsFromEntityWithDefaults($node);
-
-      // Try several keys that metatag plugins may use ('#value', '#plain_text', '#markup').
       $meta_title = $this->extractMetatagValue($tags, 'title');
       $meta_description = $this->extractMetatagValue($tags, 'description');
 
@@ -171,23 +169,23 @@ class AuditService {
       }
     }
     else {
-      // Fallback: node title + body summary heuristic.
-      if (empty($node->getTitle())) {
+      if (empty(trim($node->getTitle()))) {
         $issues[] = 'Missing node title';
       }
-      if ($node->hasField('body')) {
-        $summary = $node->get('body')->summary;
+      if ($node->hasField('body') && !$node->get('body')->isEmpty()) {
+        $summary = $node->get('body')->summary ?? '';
         if (empty(trim($summary))) {
           $issues[] = 'Missing body summary (used as meta description)';
         }
       }
     }
 
+    // Image alt text check (unchanged)
     $missing_alt_count = 0;
-    foreach ($node->getFieldDefinitions() as $field_name => $definition) {
-      if ($definition->getType() === 'image' && $node->hasField($field_name)) {
-        foreach ($node->get($field_name) as $item) {
-          // File/image items typically expose ->alt property.
+    foreach ($node->getFields() as $field_name => $field_item_list) {
+      $field_definition = $field_item_list->getFieldDefinition();
+      if ($field_definition->getType() === 'image' && !$field_item_list->isEmpty()) {
+        foreach ($field_item_list as $item) {
           if (empty($item->alt)) {
             $missing_alt_count++;
           }
@@ -198,55 +196,122 @@ class AuditService {
       $issues[] = "Images missing alt text: {$missing_alt_count}";
     }
 
-    $broken_links = [];
-    // Field types to check are configurable (e.g. text_with_summary, text_long).
-    $config = \Drupal::config('seo_audit.settings');
-    $field_types_to_check = (array) ($config->get('field_types_to_check') ?? ['text_with_summary', 'text_long']);
+    // Broken link & image checks - IMPROVED VERSION.
+    $config = $this->configFactory->get('seo_audit.settings');
+    $field_types_to_check = (array) ($config->get('field_types_to_check') ?? ['text_with_summary', 'text_long', 'text']);
+    $check_external = (bool) ($config->get('check_external_links') ?? TRUE);
 
-    foreach ($node->getFieldDefinitions() as $field_name => $definition) {
-      $type = $definition->getType();
+    $broken_links = $broken_images = $empty_links = $empty_images  = [];
 
-      // Text-like fields where HTML anchors may be present.
-      if (in_array($type, $field_types_to_check, TRUE) && $node->hasField($field_name)) {
-        $value = $node->get($field_name)->value ?? '';
-        if (!empty($value)) {
-          $links = $this->extractLinksFromHtml($value);
-          foreach ($links as $link) {
-            if (!$this->checkLink($link)) {
-              $broken_links[] = $link;
+    foreach ($node->getFields() as $field_name => $field_item_list) {
+      $field_definition = $field_item_list->getFieldDefinition();
+      $type = $field_definition->getType();
+
+      // Check HTML fields (body, text areas, etc.)
+      if (in_array($type, $field_types_to_check, TRUE) && !$field_item_list->isEmpty()) {
+        foreach ($field_item_list as $delta => $item) {
+          $html = '';
+          if (isset($item->value)) {
+            $html = (string) $item->value;
+          }
+          elseif (isset($item->summary)) {
+            $html = (string) $item->summary;
+          }
+
+          if ($html === '') {
+            continue;
+          }
+
+          // Extract ALL links including empty ones.
+          $links_data = $this->extractLinksFromHtml($html);
+          foreach ($links_data as $link_data) {
+            $href = $link_data['href'];
+            $is_empty = $link_data['empty'];
+
+            if ($is_empty) {
+              $empty_links[] = $href;
+              continue;
+            }
+
+            // Skip external links if configured.
+            if (!$check_external && $this->isExternalUrl($href)) {
+              continue;
+            }
+
+            if (!$this->checkLink($href)) {
+              $broken_links[] = $href;
+            }
+          }
+
+          // Extract ALL images including empty ones.
+          $images_data = $this->extractImagesFromHtml($html);
+          foreach ($images_data as $img_data) {
+            $src = $img_data['src'];
+            $is_empty = $img_data['empty'];
+            $has_alt = $img_data['has_alt'];
+
+            if ($is_empty) {
+              $empty_images[] = $src;
+            }
+
+            // Skip external images if configured.
+            if (!$check_external && $this->isExternalUrl($src)) {
+              continue;
+            }
+
+            if (!$is_empty && !$this->checkLink($src)) {
+              $broken_images[] = $src;
             }
           }
         }
       }
 
-      // Link field type.
-      if ($type === 'link' && $node->hasField($field_name)) {
-        foreach ($node->get($field_name) as $item) {
+      // Link field entity type (field type 'link')
+      if ($type === 'link' && !$field_item_list->isEmpty()) {
+        foreach ($field_item_list as $item) {
           $uri = $item->uri ?? '';
-          if (!empty($uri) && !$this->checkLink($uri)) {
+          if ($uri === '' || $uri === 'route:<nolink>') {
+            $empty_links[] = $uri ?: '(empty)';
+            continue;
+          }
+
+          if (!$check_external && $this->isExternalUrl($uri)) {
+            continue;
+          }
+
+          if (!$this->checkLink($uri)) {
             $broken_links[] = $uri;
           }
         }
       }
     }
 
+    // Report issues.
+    if (!empty($empty_links)) {
+      $issues[] = 'Empty links found: ' . implode(', ', array_slice($empty_links, 0, 5));
+    }
+    if (!empty($empty_images)) {
+      $issues[] = 'Empty image sources found: ' . implode(', ', array_slice($empty_images, 0, 5));
+    }
     if (!empty($broken_links)) {
       $issues[] = 'Broken links found: ' . implode(', ', array_slice($broken_links, 0, 5));
     }
+    if (!empty($broken_images)) {
+      $issues[] = 'Broken images found: ' . implode(', ', array_slice($broken_images, 0, 5));
+    }
 
+    // Compute score and save report (unchanged)
     $score = max(0, 100 - (count($issues) * 10));
 
-    // Build edit link for UI convenience.
     $edit_link = Url::fromRoute('entity.node.edit_form', ['node' => $nid])->toString();
 
-    // Persist audit row (note: ensure schema has meta_title, meta_description, edit_link).
     $this->database->merge('seo_audit_report')
       ->key('nid', $nid)
       ->fields([
         'nid' => $nid,
         'issues' => json_encode(array_values($issues)),
         'score' => $score,
-        'last_checked' => time(),
+        'last_checked' => $this->timeService->getRequestTime(),
         'meta_title' => $meta_title,
         'meta_description' => $meta_description,
         'edit_link' => $edit_link,
@@ -266,16 +331,13 @@ class AuditService {
   /**
    * Extracts a meta tag value out of the array returned by metatag.manager.
    *
-   * The metatag manager returns renderable arrays; different plugins use
-   * '#value', '#plain_text' or '#markup'.
-   *
    * @param array $tags
-   *   The render array from metatag.manager->tagsFromEntity().
+   *   The meta tags array.
    * @param string $key
-   *   The meta key to read, e.g. 'title' or 'description'.
+   *   The meta tag key to extract.
    *
    * @return string
-   *   Normalized string value (empty string if not present).
+   *   The extracted meta tag value.
    */
   protected function extractMetatagValue(array $tags, string $key): string {
     if (!isset($tags[$key])) {
@@ -299,13 +361,50 @@ class AuditService {
   /**
    * Extracts all links from the provided HTML content.
    *
-   * This method safely parses UTF-8 HTML and returns unique href values.
-   *
    * @param string $html
-   *   The HTML string to parse.
+   *   The HTML content to parse.
    *
    * @return array
-   *   An array of unique link URLs.
+   *   Array of image URLs.
+   */
+  protected function extractImagesFromHtml(string $html): array {
+    $images = [];
+
+    if (trim($html) === '') {
+      return $images;
+    }
+
+    libxml_use_internal_errors(TRUE);
+    $html = mb_convert_encoding($html, 'UTF-8', 'auto');
+    $doc = new \DOMDocument('1.0', 'UTF-8');
+    @$doc->loadHTML('<?xml encoding="UTF-8">' . $html, LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD);
+
+    foreach ($doc->getElementsByTagName('img') as $img) {
+      if ($img instanceof \DOMElement) {
+        $src = trim($img->getAttribute('src'));
+        $alt = trim($img->getAttribute('alt'));
+        $is_empty = $src === '' || $src === '#' || preg_match('/^\s*$/', $src);
+
+        $images[] = [
+          'src' => $src ?: '(empty)',
+          'empty' => $is_empty,
+          'has_alt' => !empty($alt),
+        ];
+      }
+    }
+
+    libxml_clear_errors();
+    return $images;
+  }
+
+  /**
+   * Extracts all links from the provided HTML content.
+   *
+   * @param string $html
+   *   The HTML content to parse.
+   *
+   * @return array
+   *   Array of link URLs.
    */
   protected function extractLinksFromHtml(string $html): array {
     $links = [];
@@ -314,75 +413,110 @@ class AuditService {
       return $links;
     }
 
-    // Prevent warnings from malformed HTML.
     libxml_use_internal_errors(TRUE);
-
-    // Ensure UTF-8 encoding (no HTML entity conversion — PHP 8.2 safe).
     $html = mb_convert_encoding($html, 'UTF-8', 'auto');
-
-    // Load HTML safely into DOMDocument.
     $doc = new \DOMDocument('1.0', 'UTF-8');
     @$doc->loadHTML('<?xml encoding="UTF-8">' . $html, LIBXML_HTML_NOIMPLIED | LIBXML_HTML_NODEFDTD);
 
-    // Extract all <a href="..."> links.
     foreach ($doc->getElementsByTagName('a') as $a) {
       if ($a instanceof \DOMElement) {
         $href = trim($a->getAttribute('href'));
-        if ($href !== '') {
-          $links[] = $href;
-        }
+        $is_empty = $href === '' || $href === '#' || preg_match('/^\s*$/', $href);
+
+        $links[] = [
+          'href' => $href ?: '(empty)',
+          'empty' => $is_empty,
+          'text' => trim($a->textContent),
+        ];
       }
     }
 
     libxml_clear_errors();
+    return $links;
+  }
 
-    return array_unique($links);
+  /**
+   * Check if a URL is external.
+   *
+   * @param string $url
+   *   The URL to check.
+   *
+   * @return bool
+   *   TRUE if the URL is external, FALSE otherwise.
+   */
+  protected function isExternalUrl(string $url): bool {
+    if (empty($url) || $url === '(empty)') {
+      return FALSE;
+    }
+    return preg_match('/^https?:\/\//', $url) && !$this->pathValidator->isValid($url);
   }
 
   /**
    * Validate a link (HEAD request fallback to GET).
    *
-   * Honors the config value `seo_audit.settings.check_external_links`.
+   * Returns TRUE for valid (SEO-safe) links, FALSE otherwise.
    *
    * @param string $url
-   *   URL or path to validate.
+   *   The URL to validate.
    *
    * @return bool
-   *   TRUE = link valid (or intentionally skipped), FALSE = broken.
+   *   TRUE if valid, FALSE otherwise.
    */
   protected function checkLink(string $url): bool {
-    $config = \Drupal::config('seo_audit.settings');
-    $check_external = (bool) ($config->get('check_external_links') ?? TRUE);
+    if (empty($url)) {
+      return FALSE;
+    }
 
-    // Skip external checks if disabled.
-    if (!$check_external && preg_match('/^https?:\\/\\//', $url) && !\Drupal::service('path.validator')->isInternal($url)) {
-      return TRUE;
+    // Handle internal paths.
+    if (!$this->isExternalUrl($url)) {
+      // For internal paths, convert to absolute URL for checking.
+      try {
+        if (str_starts_with($url, '/')) {
+          $url = Url::fromUserInput($url)->setAbsolute()->toString();
+        }
+        else {
+          $url = Url::fromUri($url)->setAbsolute()->toString();
+        }
+      }
+      catch (\Exception $e) {
+        $this->logger->error('Invalid internal URL @url: @error', [
+          '@url' => $url,
+          '@error' => $e->getMessage(),
+        ]);
+        return FALSE;
+      }
+    }
+
+    // Validate URL format for absolute URLs.
+    if (!filter_var($url, FILTER_VALIDATE_URL)) {
+      return FALSE;
     }
 
     try {
-      // Normalize local relative paths to absolute.
-      if (strpos($url, 'http') !== 0) {
-        $base = $this->requestStack->getCurrentRequest()->getSchemeAndHttpHost();
-        if (strpos($url, '/') === 0) {
-          $url = $base . $url;
-        }
-        else {
-          // Skip relative, non-root paths (fragment/anchor/JS links).
-          return TRUE;
-        }
-      }
-
       $response = $this->httpClient->request('HEAD', $url, [
         'timeout' => 5,
         'allow_redirects' => TRUE,
+        'http_errors' => FALSE,
       ]);
 
-      return ($response->getStatusCode() < 400);
+      $status_code = $response->getStatusCode();
+
+      if (in_array($status_code, [405, 403], TRUE)) {
+        $response = $this->httpClient->request('GET', $url, [
+          'timeout' => 5,
+          'allow_redirects' => TRUE,
+          'http_errors' => FALSE,
+        ]);
+        $status_code = $response->getStatusCode();
+      }
+
+      $valid_status_codes = [200, 301, 302, 304, 307];
+      return in_array($status_code, $valid_status_codes, TRUE);
     }
-    catch (\Exception $e) {
-      $this->logger->warning('Link check failed for @url: @message', [
+    catch (RequestException $e) {
+      $this->logger->error('Failed to check URL @url: @error', [
         '@url' => $url,
-        '@message' => $e->getMessage(),
+        '@error' => $e->getMessage(),
       ]);
       return FALSE;
     }
@@ -392,7 +526,7 @@ class AuditService {
    * Compute the overall site SEO score.
    *
    * @return float
-   *   Average score across all records (rounded to 2 decimals). 0.0 if none.
+   *   The average SEO score.
    */
   public function getOverallScore(): float {
     $avg = $this->database->query('SELECT AVG(score) FROM {seo_audit_report}')->fetchField();
@@ -400,29 +534,20 @@ class AuditService {
   }
 
   /**
-   * Detect duplicate meta titles and descriptions across saved reports and,
-   * append a "Duplicate meta ..." issue to each impacted row.
-   *
-   * This is intended to be run after a full audit pass (e.g. as an extra batch
-   * operation or a separate maintenance task). It relies on `meta_title` and
-   * `meta_description` being stored in the report table.
-   *
-   * Complexity: O(n) reads/writes of the report table. For very large sites,
-   * consider doing this in chunks or during the batch processing pipeline.
+   * Detect duplicates and update report rows.
    */
   public function markDuplicateMetaInReports(): void {
-    // 1) Find duplicate meta titles.
     $duplicate_titles = $this->database->query(
       "SELECT meta_title FROM {seo_audit_report} WHERE meta_title <> '' GROUP BY meta_title HAVING COUNT(*) > 1"
     )->fetchCol();
 
     foreach ($duplicate_titles as $title) {
-      $nids = $this->database->query(
+      $rows = $this->database->query(
         'SELECT nid, issues FROM {seo_audit_report} WHERE meta_title = :title',
         [':title' => $title]
       )->fetchAllKeyed(0, 1);
 
-      foreach ($nids as $nid => $issues_json) {
+      foreach ($rows as $nid => $issues_json) {
         $issues = json_decode($issues_json, TRUE) ?: [];
         if (!in_array('Duplicate meta title', $issues, TRUE)) {
           $issues[] = 'Duplicate meta title';
@@ -434,18 +559,17 @@ class AuditService {
       }
     }
 
-    // 2) Find duplicate meta descriptions.
     $duplicate_descs = $this->database->query(
       "SELECT meta_description FROM {seo_audit_report} WHERE meta_description <> '' GROUP BY meta_description HAVING COUNT(*) > 1"
     )->fetchCol();
 
     foreach ($duplicate_descs as $desc) {
-      $nids = $this->database->query(
+      $rows = $this->database->query(
         'SELECT nid, issues FROM {seo_audit_report} WHERE meta_description = :desc',
         [':desc' => $desc]
       )->fetchAllKeyed(0, 1);
 
-      foreach ($nids as $nid => $issues_json) {
+      foreach ($rows as $nid => $issues_json) {
         $issues = json_decode($issues_json, TRUE) ?: [];
         if (!in_array('Duplicate meta description', $issues, TRUE)) {
           $issues[] = 'Duplicate meta description';
@@ -459,14 +583,14 @@ class AuditService {
   }
 
   /**
-   * Batch callback helper. Kept compatible with Batch API static callback signature.
+   * Batch callback helper.
    *
    * @param int $nid
-   *   Node id.
+   *   The node ID to audit.
    * @param array $context
-   *   Batch context.
+   *   The batch context.
    */
-  public static function batchAuditCallback($nid, array &$context) {
+  public static function batchAuditCallback($nid, array &$context): void {
     $service = \Drupal::service('seo_audit.audit_service');
     $result = $service->auditNode((int) $nid);
     $context['results'][] = $result;
