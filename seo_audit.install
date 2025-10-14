@@ -6,6 +6,13 @@
  */
 
 /**
+ * Implements hook_install().
+ */
+function seo_audit_install() {
+  \Drupal::keyValue('system.schema')->set('seo_audit', 9000);
+}
+
+/**
  * Implements hook_schema().
  */
 function seo_audit_schema() {
@@ -22,15 +29,28 @@ function seo_audit_schema() {
         'size' => 'big',
         'not null' => FALSE,
       ],
-      'score' => [
-        'type' => 'int',
-        'not null' => FALSE,
-        'size' => 'normal',
-      ],
       'last_checked' => [
         'type' => 'int',
         'not null' => FALSE,
         'unsigned' => TRUE,
+      ],
+      'status' => [
+        'type' => 'varchar',
+        'length' => 50,
+        'not null' => FALSE,
+        'default' => NULL,
+      ],
+      'meta_title' => [
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => FALSE,
+        'default' => NULL,
+      ],
+      'meta_description' => [
+        'type' => 'text',
+        'size' => 'big',
+        'not null' => FALSE,
+        'default' => NULL,
       ],
     ],
     'primary key' => ['nid'],
@@ -39,34 +59,12 @@ function seo_audit_schema() {
 }
 
 /**
- * Add meta_title/meta_description/edit_link columns to seo_audit_report.
+ * Implements hook_uninstall().
  */
-function seo_audit_update_9001() {
-  $schema = \Drupal::database()->schema();
+function seo_audit_uninstall() {
+  // Drop custom table.
+  \Drupal::database()->schema()->dropTable('seo_audit_report');
 
-  if (!$schema->fieldExists('seo_audit_report', 'meta_title')) {
-    $schema->addField('seo_audit_report', 'meta_title', [
-      'type' => 'varchar',
-      'length' => 255,
-      'not null' => FALSE,
-      'default' => NULL,
-    ]);
-  }
-
-  if (!$schema->fieldExists('seo_audit_report', 'meta_description')) {
-    $schema->addField('seo_audit_report', 'meta_description', [
-      'type' => 'text',
-      'size' => 'big',
-      'not null' => FALSE,
-    ]);
-  }
-
-  if (!$schema->fieldExists('seo_audit_report', 'edit_link')) {
-    $schema->addField('seo_audit_report', 'edit_link', [
-      'type' => 'varchar',
-      'length' => 255,
-      'not null' => FALSE,
-      'default' => NULL,
-    ]);
-  }
+  // Remove configuration.
+  \Drupal::configFactory()->getEditable('seo_audit.settings')->delete();
 }

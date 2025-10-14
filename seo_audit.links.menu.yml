@@ -3,7 +3,7 @@ seo_audit.admin:
   title: "SEO Audit"
   description: "SEO Audit configuration and reports."
   parent: system.admin_config
-  route_name: seo_audit.report
+  route_name: seo_audit_form.report
   weight: 0
 
 # Child link: Report page
@@ -11,7 +11,7 @@ seo_audit.admin_report:
   title: "SEO Audit Report"
   description: "View the SEO audit report for content."
   parent: seo_audit.admin
-  route_name: seo_audit.report
+  route_name: seo_audit_form.report
   weight: 50
 
 # Child link: Settings page

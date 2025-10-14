@@ -155,7 +155,7 @@ class AuditService {
     $meta_title = '';
     $meta_description = '';
 
-    // Meta tags check (unchanged)
+    // Meta tags check.
     if ($this->metatagManager) {
       $tags = $this->metatagManager->tagsFromEntityWithDefaults($node);
       $meta_title = $this->extractMetatagValue($tags, 'title');
@@ -173,14 +173,15 @@ class AuditService {
         $issues[] = 'Missing node title';
       }
       if ($node->hasField('body') && !$node->get('body')->isEmpty()) {
-        $summary = $node->get('body')->summary ?? '';
-        if (empty(trim($summary))) {
-          $issues[] = 'Missing body summary (used as meta description)';
+        $body = $node->get('body')->value ?? '';
+
+        if (empty(trim($body))) {
+          $issues[] = 'Missing body (used as meta description)';
         }
       }
     }
 
-    // Image alt text check (unchanged)
+    // Image alt text check.
     $missing_alt_count = 0;
     foreach ($node->getFields() as $field_name => $field_item_list) {
       $field_definition = $field_item_list->getFieldDefinition();
@@ -196,7 +197,7 @@ class AuditService {
       $issues[] = "Images missing alt text: {$missing_alt_count}";
     }
 
-    // Broken link & image checks - IMPROVED VERSION.
+    // Broken link & image checks.
     $config = $this->configFactory->get('seo_audit.settings');
     $field_types_to_check = (array) ($config->get('field_types_to_check') ?? ['text_with_summary', 'text_long', 'text']);
     $check_external = (bool) ($config->get('check_external_links') ?? TRUE);
@@ -250,7 +251,7 @@ class AuditService {
             $is_empty = $img_data['empty'];
             $has_alt = $img_data['has_alt'];
 
-            if ($is_empty) {
+            if ($is_empty || !$has_alt) {
               $empty_images[] = $src;
             }
 
@@ -291,7 +292,7 @@ class AuditService {
       $issues[] = 'Empty links found: ' . implode(', ', array_slice($empty_links, 0, 5));
     }
     if (!empty($empty_images)) {
-      $issues[] = 'Empty image sources found: ' . implode(', ', array_slice($empty_images, 0, 5));
+      $issues[] = 'Empty image sources or alt attributes found: ' . implode(', ', array_slice($empty_images, 0, 5));
     }
     if (!empty($broken_links)) {
       $issues[] = 'Broken links found: ' . implode(', ', array_slice($broken_links, 0, 5));
@@ -300,31 +301,27 @@ class AuditService {
       $issues[] = 'Broken images found: ' . implode(', ', array_slice($broken_images, 0, 5));
     }
 
-    // Compute score and save report (unchanged)
-    $score = max(0, 100 - (count($issues) * 10));
-
-    $edit_link = Url::fromRoute('entity.node.edit_form', ['node' => $nid])->toString();
+    $status = empty($issues) ? 'passed' : 'issues';
 
     $this->database->merge('seo_audit_report')
       ->key('nid', $nid)
       ->fields([
         'nid' => $nid,
         'issues' => json_encode(array_values($issues)),
-        'score' => $score,
+        'status' => $status,
         'last_checked' => $this->timeService->getRequestTime(),
         'meta_title' => $meta_title,
         'meta_description' => $meta_description,
-        'edit_link' => $edit_link,
       ])
       ->execute();
 
     return [
       'nid' => $nid,
       'issues' => $issues,
-      'score' => $score,
+      'status' => $status,
+      'last_checked' => $this->timeService->getRequestTime(),
       'meta_title' => $meta_title,
       'meta_description' => $meta_description,
-      'edit_link' => $edit_link,
     ];
   }
 
@@ -466,6 +463,11 @@ class AuditService {
     if (empty($url)) {
       return FALSE;
     }
+    // Basic length check.
+    if (strlen($url) < 10) {
+      $this->logger->warning('URL too short: @url', ['@url' => $url]);
+      return FALSE;
+    }
 
     // Handle internal paths.
     if (!$this->isExternalUrl($url)) {
@@ -487,8 +489,9 @@ class AuditService {
       }
     }
 
-    // Validate URL format for absolute URLs.
-    if (!filter_var($url, FILTER_VALIDATE_URL)) {
+    // Enhanced URL validation.
+    if (!$this->isValidUrl($url)) {
+      $this->logger->warning('Invalid URL format: @url', ['@url' => $url]);
       return FALSE;
     }
 
@@ -520,6 +523,42 @@ class AuditService {
       ]);
       return FALSE;
     }
+    catch (\InvalidArgumentException $e) {
+      // Catch invalid argument exceptions from HTTP client.
+      $this->logger->error('Invalid URL argument @url: @error', [
+        '@url' => $url,
+        '@error' => $e->getMessage(),
+      ]);
+      return FALSE;
+    }
+  }
+
+  /**
+   * Enhanced URL validation.
+   */
+  protected function isValidUrl(string $url): bool {
+    // Basic filter_var validation.
+    if (!filter_var($url, FILTER_VALIDATE_URL)) {
+      return FALSE;
+    }
+
+    // Parse URL to check components.
+    $parsed = parse_url($url);
+
+    // Check if host exists and has reasonable length.
+    if (!isset($parsed['host']) || strlen($parsed['host']) < 2) {
+      return FALSE;
+    }
+
+    // Check for common TLDs or valid domain pattern.
+    if (!preg_match('/\.(com|org|net|edu|gov|io|co|[a-z]{2,})$/i', $parsed['host'])) {
+      // Allow localhost for testing.
+      if ($parsed['host'] !== 'localhost' && !str_contains($parsed['host'], '.local')) {
+        return FALSE;
+      }
+    }
+
+    return TRUE;
   }
 
   /**
