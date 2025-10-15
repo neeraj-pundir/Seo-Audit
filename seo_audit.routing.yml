@@ -12,7 +12,7 @@ seo_audit.run_selected:
     _controller: '\Drupal\seo_audit\Controller\SeoAuditController::runSelectedAudit'
     _title: "Run Selected SEO Audit"
   requirements:
-    _permission: "administer nodes"
+    _permission: "administer seo audit"
 
 seo_audit.run_batch:
   path: "/admin/seo-audit/run"
@@ -20,7 +20,7 @@ seo_audit.run_batch:
     _controller: '\Drupal\seo_audit\Controller\SeoAuditController::runAudit'
     _title: "Run SEO Audit"
   requirements:
-    _permission: "administer nodes"
+    _permission: "administer seo audit"
 
 seo_audit.settings:
   path: "/admin/config/seo-audit/settings"

@@ -34,10 +34,14 @@ function seo_audit_cron() {
  * Batch finished callback.
  */
 function seo_audit_batch_finished($success, $results, $operations) {
+  $messenger = \Drupal::messenger();
+  $logger = \Drupal::logger('seo_audit');
   if ($success) {
-    \Drupal::logger('seo_audit')->info('SEO Audit batch completed successfully.');
+    $messenger->addStatus(t('SEO audit completed successfully.'));
+    $logger->info('SEO Audit batch completed successfully.');
   }
   else {
-    \Drupal::logger('seo_audit')->error('SEO Audit batch had errors.');
+    $messenger->addError(t('SEO audit completed with errors.'));
+    $logger->error('SEO Audit batch had errors.');
   }
 }

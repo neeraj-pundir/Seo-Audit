@@ -376,7 +376,7 @@ final class SeoAuditForm extends FormBase {
         ],
       ];
     }
-    // dd($items);
+
     return [
       '#type' => 'container',
       '#attributes' => ['class' => ['seo-issues-list']],
@@ -400,7 +400,10 @@ final class SeoAuditForm extends FormBase {
     $links['edit'] = [
       '#type' => 'link',
       '#title' => $this->t('Edit'),
-      '#url' => Url::fromRoute('entity.node.edit_form', ['node' => $nid]),
+      '#url' => Url::fromRoute('entity.node.edit_form', [
+        'node' => $nid,
+        'destination' => Url::fromRoute('seo_audit_form.report')->toString(),
+      ]),
       '#attributes' => [
         'class' => ['button', 'button--small', 'button--edit'],
         'title' => $this->t('Edit this content'),
@@ -411,7 +414,7 @@ final class SeoAuditForm extends FormBase {
     $links['re_run_audit'] = [
       '#type' => 'link',
       '#title' => $this->t('Re-run Audit'),
-      '#url' => Url::fromRoute('seo_audit.run_selected', ['nid' => $nid]),
+      '#url' => Url::fromRoute('seo_audit.run_selected', ['nids' => $nid]),
       '#attributes' => [
         'class' => ['button', 'button--small', 'button--danger'],
         'title' => $this->t('Re-run SEO audit for this content'),

@@ -5,17 +5,19 @@ namespace Drupal\seo_audit\Controller;
 use Drupal\Core\Controller\ControllerBase;
 use Drupal\Core\Database\Connection;
 use Drupal\Core\Entity\EntityTypeManagerInterface;
+use Drupal\Core\StringTranslation\TranslatableMarkup;
 use Drupal\Core\Url;
 use Drupal\seo_audit\Service\AuditService;
 use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\HttpFoundation\RedirectResponse;
 use Symfony\Component\HttpFoundation\RequestStack;
+use Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException;
 
 /**
  * Handles SEO Audit batch operations.
  *
- * This controller provides endpoints for running SEO audits in batch mode,
- * either for all nodes of specified types or for a specific node.
+ * This controller provides endpoints for running SEO audits in batch mode
+ * for all nodes of specified types or for specific nodes.
  */
 final class SeoAuditController extends ControllerBase {
 
@@ -76,10 +78,10 @@ final class SeoAuditController extends ControllerBase {
    */
   public static function create(ContainerInterface $container): static {
     return new static(
-    $container->get('seo_audit.audit_service'),
-    $container->get('database'),
-    $container->get('entity_type.manager'),
-     $container->get('request_stack')
+      $container->get('seo_audit.audit_service'),
+      $container->get('database'),
+      $container->get('entity_type.manager'),
+      $container->get('request_stack')
     );
   }
 
@@ -88,8 +90,15 @@ final class SeoAuditController extends ControllerBase {
    *
    * @return \Symfony\Component\HttpFoundation\RedirectResponse
    *   A redirect response to the SEO Audit report page after batch starts.
+   *
+   * @throws \Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException
+   *   When user doesn't have permission to run audits.
    */
   public function runAudit(): RedirectResponse {
+    if (!$this->currentUser()->hasPermission('administer seo audit')) {
+      throw new AccessDeniedHttpException();
+    }
+
     $nids = $this->getAuditableNodeIds();
 
     if (empty($nids)) {
@@ -97,46 +106,40 @@ final class SeoAuditController extends ControllerBase {
       return $this->redirect('seo_audit_form.report');
     }
 
-    $batch = $this->buildBatch($nids, $this->t('Running SEO Audit'));
+    $batch = $this->buildBatch(
+      $nids,
+      $this->t('Running SEO Audit for @count nodes', ['@count' => count($nids)])
+    );
     batch_set($batch);
 
     return batch_process(Url::fromRoute('seo_audit_form.report')->toString());
   }
 
   /**
-   * Runs a SEO audit for a single node ID.
+   * Runs a SEO audit for specific nodes.
    *
    * @return \Symfony\Component\HttpFoundation\RedirectResponse
    *   A redirect response to the SEO Audit report page after batch starts.
+   *
+   * @throws \Symfony\Component\HttpKernel\Exception\AccessDeniedHttpException
+   *   When user doesn't have permission to run audits.
    */
   public function runSelectedAudit(): RedirectResponse {
-    // Normalize input to an array.
+    if (!$this->currentUser()->hasPermission('administer seo audit')) {
+      throw new AccessDeniedHttpException();
+    }
+
     $request = $this->requestStack->getCurrentRequest();
     $nids = $request->query->get('nids', '');
 
-    $nids = is_array($nids) && !empty($nids) ? $nids : [$nids];
-    $node_storage = $this->entityTypeManager->getStorage('node');
-
+    // Normalize and validate input.
+    $input_nids = is_array($nids) ? $nids : [$nids];
     $valid_nids = [];
-    $auditable_types = $this->getConfiguredNodeTypes();
 
-    foreach ($nids as $nid) {
-      $node = $node_storage->load($nid);
-
-      if (!$node || !$node->isPublished()) {
-        $this->messenger()->addError($this->t('Invalid or unpublished node (ID: @nid).', ['@nid' => $nid]));
-        continue;
+    foreach ($input_nids as $nid) {
+      if (is_numeric($nid) && $nid > 0) {
+        $valid_nids[] = $nid;
       }
-
-      if (!in_array($node->bundle(), $auditable_types, TRUE)) {
-        $this->messenger()->addWarning($this->t('The node type "@type" is not included in the audit configuration for node ID @nid.', [
-          '@type' => $node->bundle(),
-          '@nid' => $nid,
-        ]));
-        continue;
-      }
-
-      $valid_nids[] = $nid;
     }
 
     if (empty($valid_nids)) {
@@ -144,10 +147,42 @@ final class SeoAuditController extends ControllerBase {
       return $this->redirect('seo_audit_form.report');
     }
 
-    // Build and run batch for all valid nodes.
+    $node_storage = $this->entityTypeManager->getStorage('node');
+    $auditable_types = $this->getConfiguredNodeTypes();
+    $processed_nids = [];
+
+    foreach ($valid_nids as $nid) {
+      $node = $node_storage->load($nid);
+
+      if (!$node) {
+        $this->messenger()->addError($this->t('Node not found (ID: @nid).', ['@nid' => $nid]));
+        continue;
+      }
+
+      if (!$node->isPublished()) {
+        $this->messenger()->addWarning($this->t('Node @nid is unpublished and was skipped.', ['@nid' => $nid]));
+        continue;
+      }
+
+      if (!in_array($node->bundle(), $auditable_types, TRUE)) {
+        $this->messenger()->addWarning($this->t('Node type "@type" is not included in audit configuration for node ID @nid.', [
+          '@type' => $node->bundle(),
+          '@nid' => $nid,
+        ]));
+        continue;
+      }
+
+      $processed_nids[] = $nid;
+    }
+
+    if (empty($processed_nids)) {
+      $this->messenger()->addError($this->t('No valid nodes available for audit.'));
+      return $this->redirect('seo_audit_form.report');
+    }
+
     $batch = $this->buildBatch(
-        $valid_nids,
-        $this->t('Running SEO Audit for @count node(s).', ['@count' => count($valid_nids)])
+      $processed_nids,
+      $this->t('Running SEO Audit for @count node(s)', ['@count' => count($processed_nids)])
     );
     batch_set($batch);
 
@@ -167,10 +202,12 @@ final class SeoAuditController extends ControllerBase {
       return [];
     }
 
+    // Use accessCheck(FALSE) for administrative operations to improve
+    // performance.
     return $this->entityTypeManager->getStorage('node')->getQuery()
       ->condition('type', $node_types, 'IN')
       ->condition('status', 1)
-      ->accessCheck(TRUE)
+      ->accessCheck(FALSE)
       ->execute();
   }
 
@@ -184,7 +221,6 @@ final class SeoAuditController extends ControllerBase {
     $config = $this->config('seo_audit.settings');
     $node_types = $config->get('node_types_to_audit');
 
-    // Convert comma-separated string into an array if needed.
     if (is_string($node_types)) {
       $node_types = array_filter(array_map('trim', explode(',', $node_types)));
     }
@@ -203,7 +239,7 @@ final class SeoAuditController extends ControllerBase {
    * @return array
    *   The batch definition.
    */
-  protected function buildBatch(array $nids, $title): array {
+  protected function buildBatch(array $nids, TranslatableMarkup $title): array {
     $operations = array_map(static function ($nid) {
       return ['\Drupal\seo_audit\Service\AuditService::batchAuditCallback', [$nid]];
     }, $nids);
@@ -212,7 +248,8 @@ final class SeoAuditController extends ControllerBase {
       'title' => $title,
       'operations' => $operations,
       'finished' => 'seo_audit_batch_finished',
-      'progress_message' => t('Processed @current of @total nodes.'),
+      'progress_message' => $this->t('Processed @current of @total nodes.'),
+      'error_message' => $this->t('An error occurred during the SEO audit process.'),
     ];
   }
 
