@@ -1,0 +1,70 @@
+<?php
+
+/**
+ * @file
+ * Install, update and uninstall functions for the Seo Audit module.
+ */
+
+/**
+ * Implements hook_install().
+ */
+function seo_audit_install() {
+  \Drupal::keyValue('system.schema')->set('seo_audit', 9000);
+}
+
+/**
+ * Implements hook_schema().
+ */
+function seo_audit_schema() {
+  $schema['seo_audit_report'] = [
+    'description' => 'Stores seo audit results for nodes.',
+    'fields' => [
+      'nid' => [
+        'type' => 'int',
+        'not null' => TRUE,
+        'unsigned' => TRUE,
+      ],
+      'issues' => [
+        'type' => 'text',
+        'size' => 'big',
+        'not null' => FALSE,
+      ],
+      'last_checked' => [
+        'type' => 'int',
+        'not null' => FALSE,
+        'unsigned' => TRUE,
+      ],
+      'status' => [
+        'type' => 'varchar',
+        'length' => 50,
+        'not null' => FALSE,
+        'default' => NULL,
+      ],
+      'meta_title' => [
+        'type' => 'varchar',
+        'length' => 255,
+        'not null' => FALSE,
+        'default' => NULL,
+      ],
+      'meta_description' => [
+        'type' => 'text',
+        'size' => 'big',
+        'not null' => FALSE,
+        'default' => NULL,
+      ],
+    ],
+    'primary key' => ['nid'],
+  ];
+  return $schema;
+}
+
+/**
+ * Implements hook_uninstall().
+ */
+function seo_audit_uninstall() {
+  // Drop custom table.
+  \Drupal::database()->schema()->dropTable('seo_audit_report');
+
+  // Remove configuration.
+  \Drupal::configFactory()->getEditable('seo_audit.settings')->delete();
+}

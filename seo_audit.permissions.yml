@@ -1,0 +1,4 @@
+administer seo audit:
+  title: 'Administer SEO audit'
+  description: 'Run SEO audits and view audit reports'
+  restrict access: true

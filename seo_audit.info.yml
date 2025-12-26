@@ -1,0 +1,5 @@
+name: "Seo Audit"
+type: module
+description: "Automated content auditing for SEO and content quality."
+package: SEO
+core_version_requirement: ^9.3 || ^10 || ^11

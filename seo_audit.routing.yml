@@ -1,0 +1,31 @@
+seo_audit_form.report:
+  path: "/admin/config/seo-audit/report"
+  defaults:
+    _form: '\Drupal\seo_audit\Form\SeoAuditForm'
+    _title: "SEO Audit Report"
+  requirements:
+    _permission: "administer site configuration"
+
+seo_audit.run_selected:
+  path: "/admin/seo-audit/run-selected"
+  defaults:
+    _controller: '\Drupal\seo_audit\Controller\SeoAuditController::runSelectedAudit'
+    _title: "Run Selected SEO Audit"
+  requirements:
+    _permission: "administer seo audit"
+
+seo_audit.run_batch:
+  path: "/admin/seo-audit/run"
+  defaults:
+    _controller: '\Drupal\seo_audit\Controller\SeoAuditController::runAudit'
+    _title: "Run SEO Audit"
+  requirements:
+    _permission: "administer seo audit"
+
+seo_audit.settings:
+  path: "/admin/config/seo-audit/settings"
+  defaults:
+    _form: '\Drupal\seo_audit\Form\SeoAuditSettingsForm'
+    _title: "SEO Audit Settings"
+  requirements:
+    _permission: "administer site configuration"

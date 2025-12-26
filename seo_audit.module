@@ -1,0 +1,47 @@
+<?php
+
+/**
+ * @file
+ * Contains seo_audit.module.
+ */
+
+use Drupal\Core\Batch\BatchBuilder;
+
+/**
+ * Implements hook_cron().
+ */
+function seo_audit_cron() {
+  // Run a light audit on recent content.
+  \Drupal::logger('seo_audit')->info('Cron running: enqueueing light SEO audit.');
+  // For simplicity, we'll run audit for nodes updated in last 7 days.
+  $query = \Drupal::entityQuery('node')
+    ->condition('changed', \Drupal::time()->getRequestTime() - 7 * 86400, '>=')
+    ->range(0, 50);
+  $nids = $query->execute();
+  if (!empty($nids)) {
+    $batch_builder = new BatchBuilder();
+    $batch_builder
+      ->setTitle(t('Running SEO Audit via cron'))
+      ->setFinishCallback('seo_audit_batch_finished');
+    foreach ($nids as $nid) {
+      $batch_builder->addOperation('\Drupal\\seo_audit\\Service\\AuditService::batchAuditCallback', [$nid]);
+    }
+    batch_set($batch_builder->toArray());
+  }
+}
+
+/**
+ * Batch finished callback.
+ */
+function seo_audit_batch_finished($success, $results, $operations) {
+  $messenger = \Drupal::messenger();
+  $logger = \Drupal::logger('seo_audit');
+  if ($success) {
+    $messenger->addStatus(t('SEO audit completed successfully.'));
+    $logger->info('SEO Audit batch completed successfully.');
+  }
+  else {
+    $messenger->addError(t('SEO audit completed with errors.'));
+    $logger->error('SEO Audit batch had errors.');
+  }
+}
